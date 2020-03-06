@@ -1,0 +1,230 @@
+---
+title: "Lab 9"
+author: "Anne-Marie Parkinson"
+date: "March 5, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      message= F, 
+                      warning = F)
+```
+
+```{r}
+library(gt)
+library(tidyverse)
+library(here)
+library(boot)
+library(patchwork)
+library(broom)
+library(nlstools)
+```
+
+## fun tables with gt package
+
+use the life cycle savings built in data (?LifeCycleSavings or view(LifeCycleSavings))
+
+gt is a create package for making tables. Takes more code than kableextra, but gt is a lot easier than kableExtra when want a more specialized table
+```{r}
+
+#tidy data
+disp_income <- LifeCycleSavings %>% 
+  rownames_to_column() %>% 
+  arrange(dpi) %>% 
+  head(5) %>% 
+  mutate(ddpi = ddpi/100,
+         pop15 = pop15/100,
+         pop75 = pop75/100) #convert % values to decimal values. easier/better to work with decimals when doing stats, but when present data better to use percent
+
+# create gt table
+
+# simple table. great that gt recognizes the rowname column doesnt need a column name.
+disp_income %>% 
+  gt()
+
+# better looking table
+disp_income %>% 
+  gt() %>% 
+  tab_header(
+    title = "Life cycle savings",
+    subtitle = "5 countries with lowest per capita disposable income"
+  ) %>% 
+  fmt_currency(
+    columns = vars(dpi),
+    decimals = 2
+  ) %>% 
+  fmt_percent(vars(pop15, pop75, ddpi), 
+              decimals = 1) %>% 
+  tab_options(
+    table.width = pct(80) # table will always be 80% of page width even if adjust page width
+  ) %>% 
+  tab_footnote(
+    footnote = "Data averaged from 1970-1980",
+    location = cells_title() #footnot function NEEDS a location
+  ) %>% 
+  data_color(
+    columns = vars(dpi),
+    colors = scales::col_numeric(
+      palette = c("orange", "red", "purple"),
+      domain = c(88:190))
+  ) %>% 
+  data_color(
+    columns = vars(sr),
+    colors = scales::col_numeric(
+      palette = c("orange", "red", "purple"),
+      domain = c(5:10)) # set a range for values to be included in the coloring scheme. 
+  ) %>% 
+  cols_label(sr = "Savings Ratio")
+  
+
+```
+
+
+## explore salinity data with bootstrapping
+
+salinity dataset is a built in R dataset
+
+```{r}
+#visualize data
+hist(salinity$sal)
+ggplot(data = salinity, aes(sample=sal)) +
+  geom_qq() #eh, looks linear enough
+
+# t test
+t.test(salinity$sal)
+
+```
+
+do bootstrapping to find sampling dist based on data instead of based entirely on one sample and assumptions
+```{r}
+
+# get just sal column into a vector
+sal_nc <- salinity$sal
+
+#step 1: create functino to calculate the mean of the many bootstrap samples
+
+mean_fun <- function (x, i) {mean(x[i])}
+
+# step 2: bootstrap!
+salboot100 <- boot(data = sal_nc, 
+                   statistic = mean_fun,
+                   R = 100)
+
+salboot10k <- boot(data = sal_nc, 
+                   statistic = mean_fun,
+                   R = 10000)
+
+# step 3: get confidence interval fromm the bootstrap data
+boot.ci(salboot10k, conf = 0.95)
+
+# step 4: make data frame to store the means for each bootstrap iteration
+salboot_100_df <- data.frame(bs_mean = salboot100$t)
+salboot_10k_df <- data.frame(bs_mean = salboot10k$t)
+
+#step 5: plot the bootstrap sampling distribution (always visualize your data)
+p1 <- ggplot(data= salinity, aes(x = sal)) + geom_histogram()
+p2 <- ggplot(data = salboot_100_df, aes(x = bs_mean)) + geom_histogram()
+p3 <- ggplot(data = salboot_10k_df, aes(x = bs_mean)) + geom_histogram()
+
+#use patchwork package to display the graphs
+p1 + p2 + p3
+
+p1 + p2/ p3
+
+(p1 + p2)/ p3
+
+
+
+```
+
+ do salboot_100$t to see the mean for each of the x number of means for each bootstrap iteration
+ 
+ can set seed to make sure you and collaboraters are getting the same results, but also dont set seed at first to make sure the values arent changing a lot
+ 
+ 
+
+
+
+## exampleL nonlinear least squares
+
+```{r}
+#load data
+df <- read_csv(here("data", "log_growth.csv"))
+
+#visualize data
+ggplot(data=df, aes(x=time, y=pop)) +
+  geom_point()
+
+#try transforming data
+ggplot(data=df, aes(x=time, y=log(pop))) +
+  geom_point()
+
+```
+
+
+```{r}
+
+# Get only up to 14 hours & ln transform pop
+df_exp <- df %>% 
+  filter(time < 15) %>% 
+  mutate(ln_pop = log(pop))
+  
+# Model linear to get *k* estimate:
+lm_k <- lm(ln_pop ~ time, data = df_exp)
+lm_k
+
+# Coefficient (k) ~ 0.17
+```
+
+
+ now LNS 
+```{r}
+df_nls <- nls(pop ~ K/(1 + A*exp(-r*time)),
+              data = df, 
+              start = list(K = 180, A = 18, r = 0.17),
+              t = T) # trace = T means the code will tell us all the iterative processes it went through to get the results
+
+summary(df_nls)
+
+# Use broom:: functions to get model outputs in tidier format: 
+model_out <- broom::tidy(df_nls)
+
+# Want to just get one of these? 
+A_est <- tidy(df_nls)$estimate[1]
+
+
+```
+ 
+value in the left is trying to minimize the sum of squares of residuals (aka SSE). So the other columns values change to continue to minimize that value in the left column
+
+# visualize model
+```{r}
+
+#mock data for time variable
+t_seq <- seq(from = 0, to = 35, length = 200)
+
+# Make predictions for the population at all of those times (t) in the sequence. Here, only saying the time variable will change (K, A, and r are NOT changing they are constants in our model)
+
+p_predict <- predict(df_nls, newdata = t_seq) # output is the estimate of ...?
+
+# bind together time values and prediction values
+df_complete <- data.frame(df, p_predict)
+
+# plot
+ggplot(data = df_complete, aes(x=time, y=pop)) +
+  geom_point() +
+  geom_line(aes(x = time, y = p_predict)) +
+  theme_minimal()
+
+```
+
+
+```{r}
+df_ci <- confint2(df_nls)
+```
+
+
+
+
+
